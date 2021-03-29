@@ -10,9 +10,10 @@ import (
 )
 
 var (
-	proxyAddr    = flag.String("proxy-addr", ":8080", "Reverse Proxy Address")
-	registerAddr = flag.String("register-addr", ":8081", "Register Address")
-	clientMode   = flag.Bool("client", false, "Start client mode")
+	proxyAddr        = flag.String("proxy-addr", ":8080", "Reverse Proxy Address")
+	registerAddr     = flag.String("register-addr", ":8081", "Register Address")
+	clientMode       = flag.Bool("client", false, "Start client mode")
+	clientPreConnect = flag.Int("client-preconnect", 2, "Pre-connect connection")
 )
 
 func main() {
@@ -111,12 +112,18 @@ func startClientService() {
 	log.Printf("proxy address: %s", *proxyAddr)
 	log.Printf("register address=%s", *registerAddr)
 
+	if *clientPreConnect <= 0 {
+		*clientPreConnect = 1
+	}
+	sem := make(chan struct{}, *clientPreConnect)
+
 	h := func() {
 		log.Printf("dialing register service...")
 		regConn, err := net.Dial("tcp", *registerAddr)
 		if err != nil {
 			log.Printf("dial error retrying...; err=%v", err)
 			time.Sleep(2 * time.Second)
+			<-sem
 			return
 		}
 		defer regConn.Close()
@@ -125,8 +132,11 @@ func startClientService() {
 		var buf [1]byte
 		_, err = regConn.Read(buf[:])
 		if err != nil {
+			<-sem
 			return
 		}
+
+		<-sem
 
 		log.Printf("dialing proxy...")
 		proxyConn, err := net.Dial("tcp", *proxyAddr)
@@ -135,9 +145,9 @@ func startClientService() {
 		}
 		defer proxyConn.Close()
 
-		io.Copy(proxyConn, bytes.NewReader(buf[:]))
-
 		log.Printf("tunnel %s <=> %s", regConn.RemoteAddr(), proxyConn.RemoteAddr())
+
+		io.Copy(proxyConn, bytes.NewReader(buf[:]))
 
 		done := make(chan struct{})
 		go func() {
@@ -152,6 +162,7 @@ func startClientService() {
 	}
 
 	for {
-		h()
+		sem <- struct{}{}
+		go h()
 	}
 }
